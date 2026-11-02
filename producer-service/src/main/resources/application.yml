@@ -1,0 +1,74 @@
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+spring:
+  application:
+    name: producer-service
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/producer_db}
+    username: ${DB_USERNAME:producer}
+    password: ${DB_PASSWORD:producer}
+    hikari:
+      pool-name: producer-pool
+      maximum-pool-size: 10
+      connection-timeout: 5000
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      # Schema is owned by Flyway, never by Hibernate.
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    client-id: ${spring.application.name}
+    # Serializers are set explicitly in KafkaProducerConfig (typed, JSON, no type headers).
+    producer:
+      # Wait for all in-sync replicas so an acknowledged publish is not silently lost.
+      acks: all
+      retries: 5
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        # Fail fast instead of blocking the request thread for a minute when the broker is down.
+        delivery.timeout.ms: 30000
+        request.timeout.ms: 10000
+
+app:
+  kafka:
+    order-created-topic: orders.created
+    order-created-partitions: 3
+    order-created-replicas: 1
+    # How long the request thread waits for the broker acknowledgement.
+    send-timeout: 10s
+  relay:
+    enabled: true
+    interval: 5000
+    min-age: 5s
+    batch-size: 100
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+
+logging:
+  level:
+    com.example.orders: INFO
+    org.apache.kafka: WARN

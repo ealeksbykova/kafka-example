@@ -1,0 +1,7 @@
+# E2E harness
+# A virtualenv keeps pytest local to this repository; the harness itself only needs the standard
+# library, so pytest is the single third-party dependency.
+.venv/
+__pycache__/
+.pytest_cache/
+.runtime/

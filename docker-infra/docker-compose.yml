@@ -1,0 +1,195 @@
+# ---------------------------------------------------------------------------
+# Infrastructure for the kafka-order-events sample.
+#
+# Default (`docker compose up -d`): Kafka (KRaft) + Kafka UI + 2 PostgreSQL instances.
+# The two Spring Boot services run on the host (`./gradlew :producer-service:bootRun`).
+#
+# Full stack (`docker compose --profile full up -d --build`): additionally builds and
+# runs both services inside Docker, wired to the same infrastructure.
+# ---------------------------------------------------------------------------
+name: kafka-order-events
+
+networks:
+  kafka-net:
+    driver: bridge
+
+volumes:
+  kafka-data:
+  producer-db-data:
+  consumer-db-data:
+
+services:
+  # -------------------------------------------------------------------------
+  # Kafka in KRaft mode: no ZooKeeper container is needed since Kafka 3.3+.
+  # The single node acts both as broker and as controller.
+  # -------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:3.9.2
+    container_name: kafka-broker
+    hostname: kafka
+    ports:
+      - "${KAFKA_PORT:-9092}:9092"
+    environment:
+      # --- KRaft / cluster identity -----------------------------------------
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+      # --- Listeners ---------------------------------------------------------
+      # INTERNAL://kafka:29092 for containers, EXTERNAL://localhost:9092 for the host.
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:${KAFKA_PORT:-9092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # --- Single node friendliness -----------------------------------------
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_DELETE_TOPIC_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 3
+      # --- Retention / log hygiene ------------------------------------------
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      # `kafka-topics.sh --list` only succeeds once the broker accepts requests.
+      test: [ "CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list > /dev/null 2>&1" ]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    networks:
+      - kafka-net
+
+  # -------------------------------------------------------------------------
+  # Optional UI: http://localhost:8090
+  # -------------------------------------------------------------------------
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "${KAFKA_UI_PORT:-8090}:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    networks:
+      - kafka-net
+
+  # -------------------------------------------------------------------------
+  # One database per service (database-per-service pattern). Two instances
+  # instead of two schemas keep the isolation obvious in the compose stack.
+  # Host ports 5433/5434 avoid clashing with a locally installed PostgreSQL.
+  # -------------------------------------------------------------------------
+  producer-db:
+    image: postgres:16-alpine
+    container_name: producer-db
+    ports:
+      - "${PRODUCER_DB_PORT:-5433}:5432"
+    environment:
+      POSTGRES_DB: producer_db
+      POSTGRES_USER: producer
+      POSTGRES_PASSWORD: producer
+    volumes:
+      - producer-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U producer -d producer_db" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - kafka-net
+
+  consumer-db:
+    image: postgres:16-alpine
+    container_name: consumer-db
+    ports:
+      - "${CONSUMER_DB_PORT:-5434}:5432"
+    environment:
+      POSTGRES_DB: consumer_db
+      POSTGRES_USER: consumer
+      POSTGRES_PASSWORD: consumer
+    volumes:
+      - consumer-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U consumer -d consumer_db" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - kafka-net
+
+  # -------------------------------------------------------------------------
+  # The two Spring Boot services. Only built with the "full" profile, so the
+  # default stack stays small and fast for local development.
+  # -------------------------------------------------------------------------
+  producer-service:
+    profiles: [ "full" ]
+    build:
+      context: ..
+      dockerfile: docker-infra/Dockerfile
+      args:
+        MODULE: producer-service
+    container_name: producer-service
+    depends_on:
+      kafka:
+        condition: service_healthy
+      producer-db:
+        condition: service_healthy
+    ports:
+      - "${PRODUCER_PORT:-8080}:8080"
+    environment:
+      SERVER_PORT: 8080
+      DB_URL: jdbc:postgresql://producer-db:5432/producer_db
+      DB_USERNAME: producer
+      DB_PASSWORD: producer
+      # Containers must use the INTERNAL listener, not localhost.
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fsS http://localhost:8080/actuator/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    networks:
+      - kafka-net
+
+  consumer-service:
+    profiles: [ "full" ]
+    build:
+      context: ..
+      dockerfile: docker-infra/Dockerfile
+      args:
+        MODULE: consumer-service
+    container_name: consumer-service
+    depends_on:
+      kafka:
+        condition: service_healthy
+      consumer-db:
+        condition: service_healthy
+      producer-service:
+        condition: service_started
+    ports:
+      - "${CONSUMER_PORT:-8081}:8081"
+    environment:
+      SERVER_PORT: 8081
+      DB_URL: jdbc:postgresql://consumer-db:5432/consumer_db
+      DB_USERNAME: consumer
+      DB_PASSWORD: consumer
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_CONSUMER_GROUP: consumer-service
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fsS http://localhost:8081/actuator/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    networks:
+      - kafka-net

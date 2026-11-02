@@ -1,0 +1,5 @@
+# E2E harness dependencies.
+# The harness itself only uses the standard library; pytest drives the tests and PyYAML lets the
+# infrastructure contract tests parse docker-compose.yml instead of grepping it.
+pytest>=8.0,<9
+PyYAML>=6.0,<7

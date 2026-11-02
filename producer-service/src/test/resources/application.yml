@@ -1,0 +1,13 @@
+# Test profile for producer-service.
+#
+# Unit and slice tests must run without PostgreSQL or Kafka, therefore:
+#   * the event relay is disabled, so no background job interferes with assertions,
+#   * KafkaTemplate is replaced by a mock in the tests themselves.
+app:
+  relay:
+    enabled: false
+
+logging:
+  level:
+    com.example.orders: WARN
+    org.springframework: WARN

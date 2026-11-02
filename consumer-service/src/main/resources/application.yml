@@ -1,0 +1,80 @@
+server:
+  port: ${SERVER_PORT:8081}
+  shutdown: graceful
+
+spring:
+  application:
+    name: consumer-service
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5434/consumer_db}
+    username: ${DB_USERNAME:consumer}
+    password: ${DB_PASSWORD:consumer}
+    hikari:
+      pool-name: consumer-pool
+      maximum-pool-size: 10
+      connection-timeout: 5000
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    client-id: ${spring.application.name}
+    consumer:
+      # A stable group id means restarts resume from the committed offsets instead of the beginning.
+      group-id: ${KAFKA_CONSUMER_GROUP:consumer-service}
+      # Never commit an offset before the record was actually processed: the listener is synchronous,
+      # so an exception aborts the batch and the record is redelivered.
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+      max-poll-records: 50
+      properties:
+        isolation.level: read_committed
+    # NOTE: ack mode and error handling are configured programmatically in KafkaConsumerConfig
+    # (MANUAL_IMMEDIATE + DefaultErrorHandler with backoff and DLT). They are intentionally not
+    # duplicated here: two sources of truth would silently diverge.
+    listener:
+      # Never requeue forever: a failing record is retried by the error handler and then parked in
+      # the DLT instead of blocking its partition.
+      default-requeue-rejected: false
+    properties:
+      # Bound the number of redeliveries for transient failures (e.g. database down).
+      max.poll.interval.ms: 300000
+
+app:
+  kafka:
+    order-created-topic: orders.created
+    order-created-dlt: orders.created.DLT
+    concurrency: 3
+    # 2 retries with backoff, then the record lands in orders.created.DLT.
+    retry:
+      max-attempts: 3
+      initial-interval: 500ms
+      multiplier: 2.0
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+
+logging:
+  level:
+    com.example.orders: INFO
+    org.apache.kafka: WARN
